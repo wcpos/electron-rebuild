@@ -1,0 +1,96 @@
+# This is a basic workflow to help you get started with Actions
+
+name: electron rebuild 
+
+# Controls when the workflow will run
+on:
+  workflow_dispatch:
+    inputs:
+      electron_version:
+        description: 'Electron version'
+        required: true
+
+jobs:
+  release:
+   runs-on: ubuntu-18.04
+   steps:
+     - name: set release name
+       id: tag
+       run: echo "::set-output name=name::electron-${{ github.event.inputs.electron_version }}"
+       
+     - name: Fake file
+       run: echo "${{ steps.tag.outputs.name }}" > version.txt
+        
+     - name: Update release
+       uses: IsaacShelton/update-existing-release@v1.3.0
+       with:
+         token: ${{ secrets.GITHUB_TOKEN }}
+         release: ${{ steps.tag.outputs.name }}
+         body: sqlite binaries rebuilt against electron ${{ github.event.inputs.electron_version }}
+         files: version.txt
+
+   outputs:
+      name: ${{ steps.tag.outputs.name }}
+   
+  build:
+    needs: [release]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # using older ubuntu to mitigate "/lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.29' not found" error
+        os: [macos-latest, windows-latest, ubuntu-18.04]
+
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup node
+        uses: actions/setup-node@v3.2.0
+        with:
+          node-version: 16
+
+      - name: yarn install
+        run: yarn install
+
+      - name: rebuild
+        run: npx electron-rebuild -v "${{ github.event.inputs.electron_version }}"
+        
+      - name: apt install
+        if: matrix.os == 'ubuntu-18.04'
+        run: sudo apt-get install --no-install-recommends -y gcc-multilib g++-multilib
+        
+      - if: matrix.os != 'macos-latest'
+        name: rebuild ia32
+        run: npx electron-rebuild -v "${{ github.event.inputs.electron_version }}" -a ia32
+        
+      - name: list output
+        run: ls -R node_modules/sqlite3/bin
+        
+      - name: set platform version
+        id: os
+        run: echo "::set-output name=name::${{ matrix.os == 'macos-latest' && 'darwin' || matrix.os == 'windows-latest' && 'win32' || 'linux' }}"
+                
+      - name: rename output
+        run: node rename.js
+        env:
+          ELECTRON_VERSION: ${{ github.event.inputs.electron_version }}
+
+      - name: list renamed folder
+        run: ls -R sqlite3-${{ steps.os.outputs.name }}
+        
+      - name: tar folder
+        uses: a7ul/tar-action@v1.1.0
+        id: compress
+        with:
+          command: c
+          files: |
+            ./sqlite3-${{ steps.os.outputs.name }}
+          outPath: sqlite3-${{ steps.os.outputs.name }}.tar.gz
+        
+      - name: Update release
+        uses: ColinPitrat/update-release@v1.0.1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          release: ${{ needs.release.outputs.name }}
+          body: sqlite binaries rebuilt against electron ${{ github.event.inputs.electron_version }}
+          files: sqlite3-${{ steps.os.outputs.name }}.tar.gz
